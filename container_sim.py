@@ -62,7 +62,10 @@ GOAL_TOL       = 0.4          # reached-goal tolerance [m]
 NEIGHBOR_HORIZON = 4.0        # ORCA time horizon (tau) seconds
 DEADLOCK_PATIENCE = 250       # steps of ~no progress before a robot is "locked"
 PROGRESS_EPS   = 0.05         # min displacement over patience window to count as progress
-RECOVER_SLEEP  = 60           # steps a soft-locked robot sleeps before retrying its goal (#12)
+RECOVER_SLEEP  = 100          # steps a soft-locked robot sleeps before retrying its goal (#12)
+                              # 10 s at dt=0.1: longer sleep gives the coordination
+                              # layer (token holder) more room to route around the
+                              # frozen robot before it wakes and rejoins. (#15)
 HARD_LOCK_ATTEMPTS = 8        # after this many failed revivals, treat as a genuine hard lock (#12)
 STALL_TIMEOUT  = 300          # steps without getting closer to the goal -> deadlock (#14)
 PROGRESS_DELTA = 0.15         # min distance reduction toward goal that counts as progress (#14)
@@ -482,11 +485,17 @@ def step_world(robots, walls, obstacles, annotation, rng, bounds, coordinator=No
             plan_path(nxt, obstacles, bounds)
 
     active = [r for r in robots if not r.locked and not r.collided and r.released]
-    static_extra = []  # locked/collided/queued robots act as static discs
+    # Locked/collided/queued robots act as static obstacles, but track them
+    # SEPARATELY from real walls/obstacles: a frozen robot is a *robot*, not a
+    # wall, so the dynamic token holder should be allowed to squeeze past it with
+    # only near-physical clearance (just like it does for active yielders). If we
+    # lumped them into all_static they would use the larger STATIC_CLEAR margin
+    # (1.15 m) and actually block the holder MORE than a moving yielder does. (#15)
+    frozen_discs = []  # locked/collided/queued robots (frozen, pure static obstacles)
     for r in robots:
         if r.locked or r.collided or not r.released:
-            static_extra.append(Disc(r.x, r.y, ROBOT_RADIUS))
-    all_static = walls + obstacles + static_extra
+            frozen_discs.append(Disc(r.x, r.y, ROBOT_RADIUS))
+    all_static = walls + obstacles + frozen_discs
 
     # Compute velocities (read-only neighbor snapshot = bulletin board)
     cmds = {}
@@ -499,11 +508,25 @@ def step_world(robots, walls, obstacles, annotation, rng, bounds, coordinator=No
         # static obstacles are still avoided normally.
         if getattr(r, "coord_dyn_hold", False):
             neighbors = []
-            holder_static = list(all_static)
+            # Walls + real obstacles: avoid normally (full static clearance).
+            holder_static = list(walls) + list(obstacles)
+            # Active robots AND frozen (locked) robots alike: treat as small
+            # near-physical obstacles so the holder can thread the gap the
+            # yielders open up -- and equally drive past a frozen car, which is
+            # exactly what the locked-as-static-obstacle design is meant to allow.
             for o in active:
                 if o.id != r.id:
-                    # near-physical clearance only (2*ROBOT_RADIUS + small gap)
                     holder_static.append(Disc(o.x, o.y, ROBOT_RADIUS + 0.1))
+            # A frozen robot cannot move out of the way, so the holder must keep
+            # enough margin to never physically overlap it. The collision check
+            # fires below 2*ROBOT_RADIUS - 0.05 = 0.95 m center-to-center, so the
+            # holder's center must stay above that. We set the effective obstacle
+            # radius (= min center-to-center gap ORCA enforces) just above it.
+            # This is still far tighter than the normal static margin (1.15 m),
+            # so the holder passes close but never grazes the frozen car. (#15)
+            FROZEN_PASS_CLEAR = (2 * ROBOT_RADIUS - 0.05) + 0.1   # 1.05 m center gap
+            for fd in frozen_discs:
+                holder_static.append(Disc(fd.x, fd.y, FROZEN_PASS_CLEAR))
             vel = _orca_velocity(r, neighbors, holder_static)
         else:
             neighbors = [o for o in active if o.id != r.id]

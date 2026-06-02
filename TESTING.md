@@ -159,12 +159,42 @@ python3 run_tests.py            # 自动和 golden 对比
 
 可视化由 `viz.py` 提供。输出目录默认是 `./outputs/`(可用 `VIZ_OUT` 环境变量改)。
 
+> **重要:动画和轨迹图不会自动生成。** `run_tests.py` 扫描只产出数据(`results/` 里的 CSV/JSON),不画图。图和动画是**按需**的——你得主动调下面的命令,文件才会出现。
+
 ### 通过 wrapper(推荐)
+
+首次使用前,确保脚本有可执行位(打包/下载过程可能丢失):
+
+```bash
+chmod +x run_tests.sh
+```
+
+然后:
 
 ```bash
 ./run_tests.sh viz 12      # seed 12 的 baseline-vs-COORD 轨迹对比图 -> outputs/coord_compare_seed12.png
 ./run_tests.sh anim 12     # seed 12 的 COORD 动画 GIF(较慢)        -> outputs/anim_coord_seed12.gif
 ```
+
+把 `12` 换成任意 seed 即可。`viz` 出的是 baseline(上)vs COORD(下)的轨迹对比图;`anim` 出的是 COORD 那一版的动画。
+
+### 生成的文件去哪找、怎么打开
+
+所有图和动画都落在仓库里的 **`outputs/` 目录**(第一次生成时自动创建):
+
+```bash
+ls outputs/                 # 列出已生成的文件
+```
+
+完整路径:`~/projects/<仓库名>/outputs/`。
+
+**在 WSL2 里直接用 Windows 资源管理器打开最方便**——弹出文件夹后双击 png/gif 即可看:
+
+```bash
+explorer.exe outputs        # 在 Windows 里弹出 outputs 文件夹
+```
+
+(也可以单独打开某个文件,如 `explorer.exe outputs/coord_compare_seed12.png`。)
 
 ### 直接调 viz.py
 
@@ -181,7 +211,7 @@ viz.grid_figure([1, 42, 5, 88])  # 多 seed 概览网格
 
 图例:圆点=起点,方块=终点(红边=碰撞),编号星=完成的任务点,橙色圈/叉=标注的协调瓶颈及等待区。
 
-> **注意动画很慢、文件大**:一个 5000 步的 GIF 可能要几分钟、几 MB。建议只对你关心的单个 seed 按需生成,不要批量。`*.gif` 默认被 `.gitignore` 排除(仅保留示例 `seed12_watchdog.gif`)。
+> **注意动画很慢、文件大**:一个 5000 步的 GIF 可能要几分钟、几 MB。建议只对你关心的单个 seed 按需生成,不要批量。轨迹图(png)很快,几秒即可。`outputs/` 和 `*.gif` 默认被 `.gitignore` 排除——图不进版本库(可重新生成的产物),仅保留示例 `seed12_watchdog.gif`。
 
 ---
 
@@ -229,9 +259,22 @@ git checkout develop && git merge --no-ff feature/xxx
 
 ## 九、常见问题
 
+**`./run_tests.sh: Permission denied`?** 脚本的可执行位在打包/下载过程中丢了。`chmod +x run_tests.sh` 即可。也可以绕过 wrapper 直接 `python3 run_tests.py`。
+
+**`git status` 显示 `.gitignore` / `run_tests.sh` 被改动,但内容没动?** 多半是换行符问题(Windows 下载时把 LF 转成了 CRLF)。`git diff` 若显示"整个文件都变了"就是它。修法:
+
+```bash
+git config core.autocrlf input
+git checkout -- .gitignore run_tests.sh    # 丢弃换行符造成的伪改动
+```
+
+(`chmod +x` 后 `run_tests.sh` 重新显示 modified 是**真实改动**——权限位,提交掉即可。)
+
+**生成的图/动画找不到?** 它们不自动生成,要主动调 `./run_tests.sh viz <seed>` 或 `anim <seed>`,文件落在 `outputs/`。详见第六节。
+
 **结果和文档对不上?** 先 `git branch` 确认在哪个分支(`main` 是 #14 版、未含 #15;`develop` 含 #15),再确认依赖版本。
 
-**`run_tests.py` 报某个 seed 超时?** 默认子进程超时 600 秒,正常 5000 步约 12 秒,远不会触发;若触发说明那个 seed 卡进了异常循环,值得单独 debug。
+**`run_tests.py` 报某个 seed 超时?** 默认子进程超时 600 秒,正常 5000 步约 7~12 秒,远不会触发;若触发说明那个 seed 卡进了异常循环,值得单独 debug。
 
 **动画生成卡很久?** 正常现象(逐帧渲染)。`make_animation` 内部做了抽帧(最多 ~400 帧),但仍可能要几分钟。耐心等或减小 `max_steps`。
 

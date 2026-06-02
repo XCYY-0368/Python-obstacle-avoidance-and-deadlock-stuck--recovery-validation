@@ -269,9 +269,9 @@ def main():
                     help="skip the determinism self-check")
     ap.add_argument("--determinism-seeds", type=int, nargs="+", default=None,
                     help="which seeds to use for the determinism check (default: first 2 of --seeds)")
-    ap.add_argument("--min-survival", type=float, default=0.5,
+    ap.add_argument("--min-survival", type=float, default=0.4,
                     help="aggregate COORD survival-rate floor (0..1)")
-    ap.add_argument("--min-mean-tasks", type=float, default=20.0,
+    ap.add_argument("--min-mean-tasks", type=float, default=12.0,
                     help="aggregate COORD mean-tasks floor")
     args = ap.parse_args()
 

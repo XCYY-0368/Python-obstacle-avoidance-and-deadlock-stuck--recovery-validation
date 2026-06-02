@@ -95,8 +95,11 @@ def wheel_speeds(v, w):
 
 
 
-# Map dimensions: 5 robot-widths x 15 robot-widths (robot diameter = 1 m)
-MAP_W          = 5.0          # short side (x), [m]
+# Map dimensions. The corridor width is scaled to preserve the original
+# robot-to-corridor ratio: the old 0.5 m robot in a 5.0 m corridor gave a 10:1
+# width ratio; with the new ~0.635 m robot we widen to 6.35 m to keep comparable
+# difficulty. Height scaled proportionally is optional; kept at 15 m. (#17)
+MAP_W          = 2.0 * ROBOT_RADIUS * 5.0   # ~6.35 m (10x robot diameter, ratio-preserving)
 MAP_H          = 15.0         # long side (y), [m]
 
 GOAL_TOL       = 0.4          # reached-goal tolerance [m]
@@ -153,7 +156,7 @@ def make_container_map(rng, n_obstacles=3):
 
     # Random fixed obstacles: exactly one-robot-size (radius = ROBOT_RADIUS).
     OBST_R = ROBOT_RADIUS              # one robot-size
-    INIT_ZONE = (0.5, 4.5, 0.5, 7.5)   # x0,x1,y0,y1 keep-clear initial zone
+    INIT_ZONE = (0.5, MAP_W - 0.5, 0.5, 7.5)   # x0,x1,y0,y1 keep-clear initial zone (scales with MAP_W)
     obstacles = []
     for spacing in (0.8, 0.4, 0.0):    # relax spacing if needed to fit 3
         attempts = 0
@@ -704,7 +707,7 @@ def run_sim(seed=None, max_steps=None, record=True):
     # enforcing pairwise spacing >= D_DEPLOY. D_DEPLOY tracks the dynamic safety
     # diameter (2*ORCA_RADIUS) plus a margin, so spawns stay collision-free as the
     # robot geometry changes. Headings random; staggering emerges naturally. (#17)
-    INIT_X = (1.0, 4.0); INIT_Y = (1.0, 7.0)   # taller zone so 3 robots always fit
+    INIT_X = (1.0, MAP_W - 1.0); INIT_Y = (1.0, 7.0)   # span the corridor width (scales with MAP_W)
     D_DEPLOY = 2.0 * ORCA_RADIUS + 0.3          # >= dynamic safety diameter + margin
     starts = []
     tries = 0

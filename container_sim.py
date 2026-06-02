@@ -9,7 +9,10 @@ collision and without a global deadlock.
 
 Design follows the project handoff conventions:
   - Differential-drive (nonholonomic) robot, state (x, y, theta), control (v, w).
-  - R_min = 1.2 m, v_max = 1.0 m/s, physical radius 0.5 m, SAFETY_FACTOR = 2.0.
+  - Rectangular footprint 1.000 x 0.781 m, approximated by its circumscribed
+    circle (radius ~0.635 m) for collision/avoidance/planning. v_max = 0.9 m/s,
+    w_max = 1.0 rad/s, no minimum turning radius (spins in place), SAFETY_FACTOR
+    = 1.5. Wheel separation 0.569 m, wheel radius 0.205 m. (#17)
   - Distributed in spirit: each robot only reads a shared "bulletin board" of
     neighbor states; no central planner drives the avoidance.
   - Environment switches via env vars: SEED, MAX_STEPS, ALGO (orca only here).
@@ -38,21 +41,59 @@ import coordination as coord_mod
 COORD = os.environ.get("COORD", "0") == "1"   # enable bottleneck coordination layer
 
 # ---------------------------------------------------------------------------
-# Global physical / algorithm parameters (per handoff)
+# Physical / kinematic parameters -- real differential-drive vehicle (#17)
 # ---------------------------------------------------------------------------
-ROBOT_RADIUS   = 0.5          # physical radius [m]
+# The robot is a RECTANGULAR diff-drive platform. For now we approximate the
+# rectangle by its CIRCUMSCRIBED circle for all collision/avoidance/planning
+# (single-circle model); a full oriented-rectangle footprint can be layered on
+# later. The circumscribed circle is used because the robot turns in place to
+# arbitrary headings, so only the circle that bounds the rectangle at EVERY
+# orientation guarantees no clipping. Real-footprint work is a future step.
+#
+#   Manufacturer / vehicle spec:
+#     wheel_separation  L = 0.569 m   (track width; used for v,w <-> wheel speeds)
+#     wheel_radius      r = 0.205 m   (wheel diameter 410 mm)
+#     footprint length    = 1.000 m
+#     footprint width     = 0.781 m
+#     max_vel_x           = 0.9 m/s   (hard linear-speed cap, do not exceed)
+#     max_vel_theta       = 1.0 rad/s (spec gives none; conservative starting value)
+#     max_vel_y           = 0         (nonholonomic diff-drive: no lateral motion)
+ROBOT_LENGTH   = 1.000        # footprint length (x, body frame) [m]
+ROBOT_WIDTH    = 0.781        # footprint width  (y, body frame) [m]
+WHEEL_SEP      = 0.569        # wheel separation / track width L [m]
+WHEEL_RADIUS   = 0.205        # wheel radius r [m]
+# Circumscribed-circle radius of the 1.000 x 0.781 footprint = half-diagonal.
+ROBOT_RADIUS   = 0.5 * math.hypot(ROBOT_LENGTH, ROBOT_WIDTH)  # ~0.635 m
 SAFETY_FACTOR  = 1.5
-V_MAX          = 1.0          # max linear speed [m/s]
-R_MIN          = 1.2          # min turning radius [m]
-W_MAX          = V_MAX / R_MIN  # max angular speed bound by R_min while DRIVING
-W_TURN         = 2.0 * W_MAX    # in-place turning (v=0) is NOT bound by R_min
+V_MAX          = 0.9          # max linear speed [m/s] (= max_vel_x)
+W_MAX          = 1.0          # max angular speed [rad/s] (= max_vel_theta)
+# Differential drive can spin in place (v=0); there is NO minimum turning radius.
+# A turning robot uses W_MAX directly. (Previously R_min=1.2 m bounded |w| while
+# driving; that constraint is REMOVED per the diff-drive spec -- the only caps are
+# V_MAX and W_MAX.) (#17)
+W_TURN         = W_MAX          # in-place turn rate
 DT             = 0.1          # time step [s]
-INFLATION_R    = ROBOT_RADIUS * (1.0 + 0.48)  # ~0.74; planning radius ~ matches handoff note
+# arch2 (reserved Dubins-style smooth follower) needs a corner-rounding radius.
+# Diff-drive has no kinematic R_min, so this is purely a cosmetic smoothing radius
+# used only when STEER_MODE=="arch2" (not the default arch1). (#17)
+ARCH2_SMOOTH_R = 0.9
+INFLATION_R    = ROBOT_RADIUS * (1.0 + 0.48)  # planning radius proportional to robot size
 # Effective avoidance radius used by ORCA for OTHER ROBOTS (dynamic): physical * safety
-ORCA_RADIUS    = ROBOT_RADIUS * SAFETY_FACTOR  # 1.0 m
+ORCA_RADIUS    = ROBOT_RADIUS * SAFETY_FACTOR
 # Static walls/obstacles do NOT move, so they need only a small physical margin,
 # NOT the dynamic safety factor. Robots may pass close to walls safely.
-STATIC_CLEAR   = ROBOT_RADIUS + 0.15           # 0.65 m clearance from static surfaces
+STATIC_CLEAR   = ROBOT_RADIUS + 0.15           # clearance from static surfaces
+
+
+def wheel_speeds(v, w):
+    """Convert body (v [m/s], w [rad/s]) to left/right wheel angular speeds
+    [rad/s] for this diff-drive platform. v_l = (v - w*L/2)/r, v_r = (v + w*L/2)/r.
+    Provided for completeness / telemetry; the sim integrates (v,w) directly."""
+    vl = (v - w * WHEEL_SEP / 2.0) / WHEEL_RADIUS
+    vr = (v + w * WHEEL_SEP / 2.0) / WHEEL_RADIUS
+    return vl, vr
+
+
 
 # Map dimensions: 5 robot-widths x 15 robot-widths (robot diameter = 1 m)
 MAP_W          = 5.0          # short side (x), [m]
@@ -110,8 +151,8 @@ def make_container_map(rng, n_obstacles=3):
         walls.append(Disc(MAP_W, y, wall_r))
         y += step
 
-    # Random fixed obstacles: exactly one-robot-size.
-    OBST_R = ROBOT_RADIUS              # one robot-size (radius 0.5 m)
+    # Random fixed obstacles: exactly one-robot-size (radius = ROBOT_RADIUS).
+    OBST_R = ROBOT_RADIUS              # one robot-size
     INIT_ZONE = (0.5, 4.5, 0.5, 7.5)   # x0,x1,y0,y1 keep-clear initial zone
     obstacles = []
     for spacing in (0.8, 0.4, 0.0):    # relax spacing if needed to fit 3
@@ -383,22 +424,20 @@ def _orca_velocity(robot, neighbors, static_discs, tau=NEIGHBOR_HORIZON):
 
 
 def _to_diff_drive(robot, vel):
-    """Map a desired holonomic velocity to differential-drive (v, w) honoring
-    R_min (|w| <= v / R_min => |w| <= W_MAX scaled) and v_max."""
+    """Map a desired holonomic velocity to differential-drive (v, w). Diff-drive
+    has NO minimum turning radius (it can spin in place), so the only caps are
+    V_MAX and W_MAX; linear speed is still reduced when poorly aligned. (#17)"""
     speed = np.linalg.norm(vel)
     if speed < 1e-6:
         return 0.0, 0.0
     desired_theta = math.atan2(vel[1], vel[0])
     err = math.atan2(math.sin(desired_theta - robot.theta),
                      math.cos(desired_theta - robot.theta))
-    # angular velocity proportional to heading error, capped
+    # angular velocity proportional to heading error, capped at W_MAX
     w = max(-W_MAX, min(W_MAX, 2.0 * err))
-    # reduce linear speed when we must turn sharply (respect turning radius)
+    # reduce linear speed when we must turn sharply (face the target before moving)
     align = max(0.0, math.cos(err))
     v = min(V_MAX, speed) * align
-    # enforce |w| <= v / R_min when moving; if nearly stopped allow turn in place
-    if v > 1e-3 and abs(w) > v / R_MIN:
-        w = math.copysign(v / R_MIN, w)
     return v, w
 
 
@@ -662,11 +701,11 @@ def run_sim(seed=None, max_steps=None, record=True):
     coordinator = coord_mod.Coordinator(annotation) if COORD else None
 
     # Initial zone: random placement (Poisson-disc) inside a bottom rectangle,
-    # enforcing pairwise spacing >= D_DEPLOY (>= d_min = 2*ORCA_RADIUS = 2.0 m).
-    # Headings random. Horizontal-and-vertical staggering emerges naturally, so
-    # no queued robot structurally blocks another's departure direction.
+    # enforcing pairwise spacing >= D_DEPLOY. D_DEPLOY tracks the dynamic safety
+    # diameter (2*ORCA_RADIUS) plus a margin, so spawns stay collision-free as the
+    # robot geometry changes. Headings random; staggering emerges naturally. (#17)
     INIT_X = (1.0, 4.0); INIT_Y = (1.0, 7.0)   # taller zone so 3 robots always fit
-    D_DEPLOY = 2.2                               # >= d_min = 2.0 m
+    D_DEPLOY = 2.0 * ORCA_RADIUS + 0.3          # >= dynamic safety diameter + margin
     starts = []
     tries = 0
     while len(starts) < 3 and tries < 8000:
@@ -837,7 +876,7 @@ def plan_path(robot, obstacles, bounds):
     minimum-turning-radius curve that the robot tracks while edge-turning."""
     poly = _astar_path((robot.x, robot.y), tuple(robot.goal), obstacles, bounds)
     if STEER_MODE == "arch2" and len(poly) >= 2:
-        robot.path = _round_corners(poly, R_MIN)
+        robot.path = _round_corners(poly, ARCH2_SMOOTH_R)
     else:
         robot.path = poly
     robot.wp_idx = 0
@@ -901,8 +940,9 @@ def _steer_arch1(robot, desired_vec):
     if near_target and err_deg < 120.0:
         robot._turning = False
 
+
     if robot._turning:
-        # TURNING in place (v=0, free of R_min, fast W_TURN)
+        # TURNING in place (v=0): diff-drive spins freely at W_TURN.
         return 0.0, math.copysign(W_TURN, err)
 
     # DRIVING: speed decoupled from |desired_vec|. Full speed scaled only by how
@@ -912,9 +952,8 @@ def _steer_arch1(robot, desired_vec):
     v = V_MAX * align * (0.4 + 0.6 * compress)  # keep moving unless badly blocked
     if near_target:
         v = max(v, 0.25 * V_MAX * max(0.0, math.cos(err)))  # keep creeping in (#11)
+    # No minimum turning radius (diff-drive): w is simply capped at W_MAX. (#17)
     w = max(-W_MAX, min(W_MAX, 2.0 * err))      # arc-while-driving micro-correction
-    if v > 1e-3 and abs(w) > v / R_MIN:         # respect R_min while moving
-        w = math.copysign(v / R_MIN, w)
     return v, w
 
 
@@ -1003,7 +1042,7 @@ def _steer_arch2(robot, desired_vec):
     compress = min(1.0, speed_des / V_MAX)
     v = V_MAX * sf * (0.5 + 0.5*compress)
     if v > 1e-3:
-        wmax = v / R_MIN                 # curvature-limited while driving
+        wmax = v / ARCH2_SMOOTH_R         # arch2 smoothing radius (reserved)
         w = max(-wmax, min(wmax, 2.5*err))
     else:
         w = math.copysign(W_TURN, err)

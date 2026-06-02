@@ -5,3 +5,9 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# Generated test artifacts and visualizations
+outputs/
+results/
+*.gif
+!seed12_watchdog.gif
